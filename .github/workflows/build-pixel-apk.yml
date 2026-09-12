@@ -20,7 +20,7 @@ jobs:
           java-version: "17"
 
       - name: Set up Gradle 9.6
-        uses: gradle/actions/setup-gradle@v4
+        uses: gradle/actions/setup-gradle@v6
         with:
           gradle-version: "9.6.0"
 
@@ -64,7 +64,7 @@ jobs:
           test -f "$PIXEL_DIR/build.gradle.kts"
           test -f "$PIXEL_DIR/app/build.gradle.kts"
 
-            - name: Set up Android SDK
+      - name: Set up Android SDK
         uses: android-actions/setup-android@v4
 
       - name: Install Android SDK API 37
@@ -105,7 +105,7 @@ jobs:
           set -euo pipefail
 
           APK="$(find "$PIXEL_DIR/app/build/outputs/apk" \
-              -type f -name '*.apk' | head -n 1)"
+            -type f -name '*.apk' | head -n 1)"
 
           if [ -z "$APK" ]; then
             echo "Gradle succeeded but no APK was found."
@@ -157,15 +157,16 @@ jobs:
           mkdir -p "$PROJECT_ROOT/Release/Android"
 
           cp Release/Android/PercheCameraCompanion-v15.0.1-debug.apk \
-             "$PROJECT_ROOT/Release/Android/"
+            "$PROJECT_ROOT/Release/Android/"
 
           cp Release/Android/SHA256.txt \
-             "$PROJECT_ROOT/Release/Android/"
+            "$PROJECT_ROOT/Release/Android/"
 
           cp Release/Android/APK-INFO.txt \
-             "$PROJECT_ROOT/Release/Android/"
+            "$PROJECT_ROOT/Release/Android/"
 
           cd checkpoint
+
           zip -qr \
             "$GITHUB_WORKSPACE/PercheProgression-v15.0.1-with-Pixel-Companion.zip" \
             .
