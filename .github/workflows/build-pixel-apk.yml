@@ -63,7 +63,91 @@ jobs:
           test -f "$PIXEL_DIR/settings.gradle.kts"
           test -f "$PIXEL_DIR/build.gradle.kts"
           test -f "$PIXEL_DIR/app/build.gradle.kts"
+      - name: Fix CameraX 1.6.2 compilation
+        shell: bash
+        run: |
+          set -euo pipefail
 
+          FILE="$PIXEL_DIR/app/src/main/kotlin/com/tasnim/perchecamera/CameraRecordingService.kt"
+
+          python3 - "$FILE" <<'PY'
+          import sys
+          from pathlib import Path
+
+          path = Path(sys.argv[1])
+          source = path.read_text()
+
+          # 1. CameraX 1.6.x requires DynamicRange for quality queries.
+          if "import androidx.camera.core.DynamicRange" not in source:
+              source = source.replace(
+                  "import androidx.camera.core.CameraInfo\n",
+                  "import androidx.camera.core.CameraInfo\n"
+                  "import androidx.camera.core.DynamicRange\n"
+              )
+
+          # 2. After map { it.public }, the elements are already
+          #    CameraConfiguration objects. Sort their properties directly.
+          old_configurations = (
+              "fun configurations(): List<CameraConfiguration> = "
+              "configs.values.map { it.public }.sortedWith("
+              "compareBy({ it.public.lensLabel }, { it.public.width }, { it.public.fps }))"
+          )
+
+          new_configurations = (
+              "fun configurations(): List<CameraConfiguration> = "
+              "configs.values.map { it.public }.sortedWith("
+              "compareBy({ it.lensLabel }, { it.width }, { it.fps }))"
+          )
+
+          if old_configurations not in source:
+              raise SystemExit(
+                  "Expected configurations() implementation was not found; "
+                  "refusing to patch an unexpected source version."
+              )
+
+          source = source.replace(
+              old_configurations,
+              new_configurations
+          )
+
+          # 3. VideoCapabilities API in CameraX 1.6.x.
+          old_normal = "for (quality in capabilities.supportedQualities)"
+          new_normal = (
+              "for (quality in capabilities.getSupportedQualities(DynamicRange.SDR))"
+          )
+
+          if old_normal not in source:
+              raise SystemExit(
+                  "Expected normal-video supportedQualities call was not found."
+              )
+
+          source = source.replace(old_normal, new_normal)
+
+          # 4. High-speed capabilities are nullable.
+          old_high = "for (quality in highCaps.supportedQualities)"
+          new_high = (
+              "for (quality in "
+              "highCaps?.getSupportedQualities(DynamicRange.SDR).orEmpty())"
+          )
+
+          if old_high not in source:
+              raise SystemExit(
+                  "Expected high-speed supportedQualities call was not found."
+              )
+
+          source = source.replace(old_high, new_high)
+
+          path.write_text(source)
+
+          print("CameraRecordingService.kt patched successfully.")
+          PY
+
+          echo "===== Relevant patched source ====="
+          grep -n \
+            -e "fun configurations" \
+            -e "getSupportedQualities" \
+            -e "DynamicRange" \
+            "$FILE"
       - name: Set up Android SDK
         uses: android-actions/setup-android@v4
 
