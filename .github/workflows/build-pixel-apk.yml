@@ -64,12 +64,13 @@ jobs:
           test -f "$PIXEL_DIR/build.gradle.kts"
           test -f "$PIXEL_DIR/app/build.gradle.kts"
 
+            - name: Set up Android SDK
+        uses: android-actions/setup-android@v4
+
       - name: Install Android SDK API 37
         shell: bash
         run: |
           set -euo pipefail
-
-          yes | sdkmanager --licenses >/dev/null || true
 
           sdkmanager \
             "platform-tools" \
@@ -77,6 +78,10 @@ jobs:
             "build-tools;36.0.0"
 
           echo "ANDROID_HOME=$ANDROID_HOME"
+          echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT"
+
+          which sdkmanager
+          sdkmanager --version
           java -version
           gradle --version
 
