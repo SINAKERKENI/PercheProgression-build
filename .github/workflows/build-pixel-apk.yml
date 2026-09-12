@@ -63,7 +63,28 @@ jobs:
           test -f "$PIXEL_DIR/settings.gradle.kts"
           test -f "$PIXEL_DIR/build.gradle.kts"
           test -f "$PIXEL_DIR/app/build.gradle.kts"
-      
+
+      - name: Verify permanent CameraX fixes
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          FILE="$PIXEL_DIR/app/src/main/kotlin/com/tasnim/perchecamera/CameraRecordingService.kt"
+
+          test -f "$FILE"
+
+          grep -q "DynamicRange.SDR" "$FILE"
+          grep -q "getSupportedQualities" "$FILE"
+
+          if grep -q "it.public.lensLabel" "$FILE"; then
+            echo "ERROR: old broken CameraConfiguration sorting still present."
+            exit 1
+          fi
+
+          echo "Permanent CameraX source fixes detected."
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v4
       - name: Set up Android SDK
         uses: android-actions/setup-android@v4
 
