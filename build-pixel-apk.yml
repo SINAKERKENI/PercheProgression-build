@@ -1,0 +1,372 @@
+name: Build Perche Camera Companion
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "PercheProgression-v15.0.5-source-ready.zip"
+      - "PixelCameraCompanion/**"
+      - ".github/workflows/build-pixel-apk.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  android-debug-apk:
+    name: Android debug APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Gradle 9.6.0
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "9.6.0"
+
+      - name: Use preinstalled Android SDK
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          sdk_root="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-/usr/local/lib/android/sdk}}"
+          sdkmanager_bin="$(command -v sdkmanager || true)"
+          if [[ -z "$sdkmanager_bin" && -x "$sdk_root/cmdline-tools/latest/bin/sdkmanager" ]]; then
+            sdkmanager_bin="$sdk_root/cmdline-tools/latest/bin/sdkmanager"
+          fi
+
+          if [[ -z "$sdkmanager_bin" || ! -x "$sdkmanager_bin" ]]; then
+            echo "GitHub-hosted Android SDK/sdmanager was not found." >&2
+            exit 1
+          fi
+
+          echo "ANDROID_HOME=$sdk_root" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$sdk_root" >> "$GITHUB_ENV"
+          echo "$(dirname "$sdkmanager_bin")" >> "$GITHUB_PATH"
+          echo "$sdk_root/platform-tools" >> "$GITHUB_PATH"
+
+          echo "Using preinstalled sdkmanager: $sdkmanager_bin"
+          "$sdkmanager_bin" --version
+
+      - name: Install Android API 37 and compatible build tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          sdkmanager_bin="$(command -v sdkmanager)"
+          yes | "$sdkmanager_bin" --licenses >/dev/null || true
+          "$sdkmanager_bin" "platform-tools" "platforms;android-37" "build-tools;36.0.0"
+          echo "ANDROID_BUILD_TOOLS=36.0.0" >> "$GITHUB_ENV"
+
+      - name: Locate or extract v15.0.5 source checkpoint
+        id: source
+        shell: bash
+        run: |
+          set -euo pipefail
+          extracted="$RUNNER_TEMP/perche-v15.0.5"
+          checkpoint="$(find "$GITHUB_WORKSPACE" -maxdepth 2 -type f -name 'PercheProgression-v15.0.5-source-ready.zip' -print -quit)"
+
+          if [[ -n "$checkpoint" ]]; then
+            rm -rf "$extracted"
+            mkdir -p "$extracted"
+            unzip -q "$checkpoint" -d "$extracted"
+            project_root="$(find "$extracted" -type d -name PixelCameraCompanion -print -quit | xargs -r dirname)"
+          elif [[ -d "$GITHUB_WORKSPACE/PixelCameraCompanion" ]]; then
+            project_root="$GITHUB_WORKSPACE"
+          else
+            project_root="$(find "$GITHUB_WORKSPACE" -type d -name PixelCameraCompanion -print -quit | xargs -r dirname)"
+          fi
+
+          if [[ -z "${project_root:-}" || ! -d "$project_root/PixelCameraCompanion" ]]; then
+            echo "PixelCameraCompanion/ was not found in the checked-out repository or checkpoint ZIP." >&2
+            exit 1
+          fi
+
+          echo "PROJECT_ROOT=$project_root" >> "$GITHUB_ENV"
+          echo "ANDROID_ROOT=$project_root/PixelCameraCompanion" >> "$GITHUB_ENV"
+          echo "Project root: $project_root"
+
+      - name: Verify permanent CameraX source fixes
+        shell: bash
+        run: |
+          set -euo pipefail
+          source_file="$ANDROID_ROOT/app/src/main/kotlin/com/tasnim/perchecamera/CameraRecordingService.kt"
+          test -f "$source_file"
+
+          grep -Fq 'import androidx.camera.core.DynamicRange' "$source_file"
+          grep -Fq 'getSupportedQualities(DynamicRange.SDR)' "$source_file"
+          grep -Fq 'highCaps?.getSupportedQualities(DynamicRange.SDR).orEmpty()' "$source_file"
+
+          if grep -Eq 'capabilities\.supportedQualities|highCaps\.supportedQualities' "$source_file"; then
+            echo "Legacy CameraX supportedQualities access is still present." >&2
+            exit 1
+          fi
+
+          if grep -Fq 'it.public.lensLabel' "$source_file"; then
+            echo "Legacy broken CameraConfiguration comparator is still present." >&2
+            exit 1
+          fi
+
+          echo "Permanent CameraX source fixes verified."
+
+      - name: Verify v15.0.5 live preview source
+        shell: bash
+        run: |
+          set -euo pipefail
+          service="$ANDROID_ROOT/app/src/main/kotlin/com/tasnim/perchecamera/CameraRecordingService.kt"
+          activity="$ANDROID_ROOT/app/src/main/kotlin/com/tasnim/perchecamera/MainActivity.kt"
+          gradle_file="$ANDROID_ROOT/app/build.gradle.kts"
+          swift_protocol="$PROJECT_ROOT/AppModule/Services/RemoteCameraProtocol.swift"
+          swift_controller="$PROJECT_ROOT/AppModule/Services/RemoteCameraService.swift"
+
+          grep -Fq 'androidx.camera:camera-view:1.6.2' "$gradle_file"
+          grep -Fq 'PreviewView' "$activity"
+          grep -Fq 'previewStreamState.observe' "$activity"
+          grep -Fq 'Version 15.0.5 (150005)' "$activity"
+          grep -Fq 'Preview.Builder()' "$service"
+          grep -Fq 'SessionConfig.Builder(preview, videoCapture)' "$service"
+          grep -Fq '.setPreview(preview)' "$service"
+          grep -Fq 'fun cameraReady()' "$service"
+          grep -Fq 'fun attachPreviewSurface' "$service"
+          grep -Fq 'Arrière — principale' "$service"
+          grep -Fq 'cameraReady' "$swift_protocol"
+          grep -Fq 'previewActive' "$swift_protocol"
+          grep -Fq 'Caméra non prête' "$swift_controller"
+
+          echo "v15.0.5 live CameraX preview source verified."
+
+      - name: Verify iPad remote-camera source fixes
+        shell: bash
+        run: |
+          set -euo pipefail
+          source_file="$PROJECT_ROOT/AppModule/Services/RemoteCameraService.swift"
+          test -f "$source_file"
+
+          grep -Fq 'sender.addresses' "$source_file"
+          grep -Fq 'NI_NUMERICHOST' "$source_file"
+          grep -Fq 'AF_INET' "$source_file"
+          grep -Fq 'AF_INET6' "$source_file"
+          grep -Fq 'RemoteCameraEndpointSelection.preferredHost' "$source_file"
+          grep -Fq '"_perche-camera._tcp."' "$source_file"
+
+          if grep -Fq 'guard let host = sender.hostName' "$source_file"; then
+            echo "Legacy hostname-only NetService endpoint selection is still present." >&2
+            exit 1
+          fi
+
+          if grep -Fq 'var resumed = false' "$source_file"; then
+            echo "Legacy racy continuation guard is still present." >&2
+            exit 1
+          fi
+
+          echo "Permanent Swift remote-camera source fixes verified."
+
+      - name: Verify v15.0.5 recording lifecycle fixes
+        shell: bash
+        run: |
+          set -euo pipefail
+          swift_store="$PROJECT_ROOT/AppModule/Services/VideoFileStore.swift"
+          swift_remote="$PROJECT_ROOT/AppModule/Services/RemoteCameraService.swift"
+          android_service="$ANDROID_ROOT/app/src/main/kotlin/com/tasnim/perchecamera/CameraRecordingService.kt"
+          android_server="$ANDROID_ROOT/app/src/main/kotlin/com/tasnim/perchecamera/LocalCameraServer.kt"
+
+          grep -Fq 'preferredFileExtension' "$swift_store"
+          grep -Fq 'validatePlayableVideo' "$swift_store"
+          grep -Fq 'prepareLegacyRemoteRepair' "$swift_store"
+          grep -Fq 'preferredVideoExtension(fromRemoteFilename:' "$swift_remote"
+          grep -Fq 'reconcileFinalization' "$swift_remote"
+          grep -Fq 'transferComplete' "$swift_remote"
+
+          grep -Fq 'requestStopFromPixel' "$android_service"
+          grep -Fq 'transferState = "pending"' "$android_service"
+          grep -Fq 'recoverIfIdle' "$android_service"
+          grep -Fq '"transferComplete"' "$android_server"
+
+          rewrite_hits="$(grep -R -nE '^[[:space:]]*(sed -i|perl -pi|python .*CameraRecordingService)' "$GITHUB_WORKSPACE/.github/workflows" || true)"
+          if [[ -n "$rewrite_hits" ]]; then
+            echo "$rewrite_hits" >&2
+            echo "CI must not rewrite CameraRecordingService.kt." >&2
+            exit 1
+          fi
+
+          echo "v15.0.5 lifecycle source integrity verified."
+
+      - name: Verify v15.0.5 record-start and remote-config reliability source
+        shell: bash
+        run: |
+          set -euo pipefail
+          service="$ANDROID_ROOT/app/src/main/kotlin/com/tasnim/perchecamera/CameraRecordingService.kt"
+          server="$ANDROID_ROOT/app/src/main/kotlin/com/tasnim/perchecamera/LocalCameraServer.kt"
+          activity="$ANDROID_ROOT/app/src/main/kotlin/com/tasnim/perchecamera/MainActivity.kt"
+          diagnostic="$ANDROID_ROOT/app/src/main/kotlin/com/tasnim/perchecamera/CameraDiagnosticStore.kt"
+          app_class="$ANDROID_ROOT/app/src/main/kotlin/com/tasnim/perchecamera/PercheCameraApplication.kt"
+          operation_state="$ANDROID_ROOT/protocol/src/main/kotlin/com/tasnim/perchecamera/protocol/RemoteCameraStateMachine.kt"
+          operation_tests="$ANDROID_ROOT/protocol/src/test/kotlin/com/tasnim/perchecamera/protocol/CameraOperationCoordinatorTest.kt"
+          swift_controller="$PROJECT_ROOT/AppModule/Services/RemoteCameraService.swift"
+          swift_ui="$PROJECT_ROOT/AppModule/Features/Video/VideoLabView.swift"
+
+          grep -Fq 'CameraOperationState.STARTING_RECORDING' "$service"
+          grep -Fq 'PendingRecording.start begin' "$service"
+          grep -Fq 'VideoRecordEvent.Start' "$service"
+          grep -Fq 'START_EVENT_TIMEOUT_MS' "$service"
+          grep -Fq 'audio disabled; withAudioEnabled not called' "$service"
+          grep -Fq 'requireMainThread("bindCameraUseCases")' "$service"
+          grep -Fq 'sameActiveConfiguration' "$service"
+          grep -Fq 'cameraOperationState' "$server"
+          grep -Fq 'activeConfigurationID' "$server"
+          grep -Fq 'controlErrorMessage' "$server"
+          grep -Fq 'CameraDiagnosticStore.lastCrashSummary' "$activity"
+          grep -Fq 'Copier le diagnostic' "$activity"
+          grep -Fq 'Version 15.0.5 (150005)' "$activity"
+          grep -Fq 'Thread.setDefaultUncaughtExceptionHandler' "$diagnostic"
+          grep -Fq 'CameraDiagnosticStore.installCrashHandler' "$app_class"
+          grep -Fq 'enum class CameraOperationState' "$operation_state"
+          test -f "$operation_tests"
+          grep -Fq 'requestConfigurationChange' "$swift_controller"
+          grep -Fq 'activeConfigurationID' "$swift_controller"
+          grep -Fq 'confirmedConfigurationBinding' "$swift_ui"
+
+          # Record start must not rebind the camera session. The selected configuration must be
+          # acknowledged beforehand and startBoundRecording must use the already-bound Recorder.
+          record_start_body="$(sed -n '/fun startRemoteRecording/,/fun stopRemoteRecording/p' "$service")"
+          if grep -Fq 'bindCameraUseCases(config)' <<<"$record_start_body"; then
+            echo "recordStart still performs an implicit CameraX rebind." >&2
+            exit 1
+          fi
+
+          rewrite_hits="$(grep -R -nE '^[[:space:]]*(sed -i|perl -pi|python .*CameraRecordingService)' "$GITHUB_WORKSPACE/.github/workflows" || true)"
+          if [[ -n "$rewrite_hits" ]]; then
+            echo "$rewrite_hits" >&2
+            echo "CI must compile production CameraRecordingService.kt as stored." >&2
+            exit 1
+          fi
+
+          echo "v15.0.5 record-start/configuration source integrity verified."
+
+      - name: Build Pixel companion
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$ANDROID_ROOT"
+          gradle clean :app:assembleDebug --stacktrace --warning-mode all 2>&1 | tee "$GITHUB_WORKSPACE/android-build.log"
+
+      - name: Preserve and inspect APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          apk="$(find "$ANDROID_ROOT/app/build/outputs/apk/debug" -type f -name '*.apk' -print -quit)"
+          if [[ -z "$apk" || ! -s "$apk" ]]; then
+            echo "Gradle completed but no non-empty debug APK was found." >&2
+            exit 1
+          fi
+
+          out_apk="$GITHUB_WORKSPACE/PercheCameraCompanion-v15.0.5-debug.apk"
+          cp "$apk" "$out_apk"
+          sha256sum "$out_apk" | tee "$GITHUB_WORKSPACE/SHA256.txt"
+
+          aapt_bin="$ANDROID_HOME/build-tools/$ANDROID_BUILD_TOOLS/aapt"
+          if [[ ! -x "$aapt_bin" ]]; then
+            aapt_bin="$(find "$ANDROID_HOME/build-tools" -type f -name aapt -perm -111 | sort -V | tail -n 1)"
+          fi
+          if [[ -z "$aapt_bin" || ! -x "$aapt_bin" ]]; then
+            echo "aapt was not found after installing Android build tools." >&2
+            exit 1
+          fi
+
+          {
+            echo "APK: $(basename "$out_apk")"
+            echo "Bytes: $(stat -c %s "$out_apk")"
+            echo
+            echo "=== aapt dump badging ==="
+            "$aapt_bin" dump badging "$out_apk"
+            echo
+            echo "=== aapt dump permissions ==="
+            "$aapt_bin" dump permissions "$out_apk"
+            echo
+            echo "=== AndroidManifest.xml ==="
+            "$aapt_bin" dump xmltree "$out_apk" AndroidManifest.xml
+          } | tee "$GITHUB_WORKSPACE/APK-INFO.txt"
+
+      - name: Run Android tests
+        shell: bash
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          cd "$ANDROID_ROOT"
+          gradle :protocol:test :app:testDebugUnitTest --stacktrace --warning-mode all 2>&1 | tee "$GITHUB_WORKSPACE/android-tests.log"
+
+      - name: Run Android lint
+        shell: bash
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          cd "$ANDROID_ROOT"
+          gradle :app:lintDebug --stacktrace --warning-mode all 2>&1 | tee "$GITHUB_WORKSPACE/android-lint.log"
+
+      - name: Build combined source archive containing verified APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          release_dir="$PROJECT_ROOT/Release/Android"
+          mkdir -p "$release_dir"
+          cp "$GITHUB_WORKSPACE/PercheCameraCompanion-v15.0.5-debug.apk" "$release_dir/"
+          rm -rf \
+            "$ANDROID_ROOT/.gradle" \
+            "$ANDROID_ROOT/app/build" \
+            "$ANDROID_ROOT/protocol/build"
+
+          combined="$GITHUB_WORKSPACE/PercheProgression-v15.0.5-with-Pixel-Companion.zip"
+          project_name="$(basename "$PROJECT_ROOT")"
+          (
+            cd "$(dirname "$PROJECT_ROOT")"
+            zip -qr "$combined" "$project_name" \
+              -x '*/.git/*' '*/.DS_Store' '*/DerivedData/*' '*/.build/*' '*/__pycache__/*' '*.pyc'
+          )
+
+          apk_member="$(unzip -Z1 "$combined" | grep -E '/Release/Android/PercheCameraCompanion-v15\.0\.5-debug\.apk$' | head -n 1)"
+          if [[ -z "$apk_member" ]]; then
+            echo "Combined ZIP does not contain the expected APK." >&2
+            exit 1
+          fi
+
+          expected="$(sha256sum "$GITHUB_WORKSPACE/PercheCameraCompanion-v15.0.5-debug.apk" | awk '{print $1}')"
+          actual="$(unzip -p "$combined" "$apk_member" | sha256sum | awk '{print $1}')"
+          if [[ "$expected" != "$actual" ]]; then
+            echo "APK SHA-256 mismatch inside combined ZIP." >&2
+            exit 1
+          fi
+          echo "Combined ZIP APK SHA-256 verified: $actual"
+
+      - name: Upload build log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: PercheProgression-v15.0.5-Android-Build-Logs
+          if-no-files-found: warn
+          retention-days: 14
+          path: |
+            android-build.log
+            android-tests.log
+            android-lint.log
+
+      - name: Upload Android build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: PercheProgression-v15.0.5-Android-Build
+          if-no-files-found: error
+          retention-days: 30
+          path: |
+            PercheCameraCompanion-v15.0.5-debug.apk
+            APK-INFO.txt
+            SHA256.txt
+            android-build.log
+            android-tests.log
+            android-lint.log
+            PercheProgression-v15.0.5-with-Pixel-Companion.zip
