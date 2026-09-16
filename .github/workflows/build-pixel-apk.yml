@@ -60,10 +60,54 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+
           sdkmanager_bin="$(command -v sdkmanager)"
           yes | "$sdkmanager_bin" --licenses >/dev/null || true
-          "$sdkmanager_bin" "platform-tools" "platforms;android-37" "build-tools;36.0.0"
-          echo "ANDROID_BUILD_TOOLS=36.0.0" >> "$GITHUB_ENV"
+
+          LIST="$RUNNER_TEMP/android-sdk-packages.txt"
+
+          echo "===== Query Android preview SDK packages ====="
+          "$sdkmanager_bin" --list --channel=3 > "$LIST"
+
+          echo "===== API 37 candidates ====="
+          grep -E 'platforms;android-(37|37\.0|CinnamonBun)' "$LIST" || true
+
+          if grep -q 'platforms;android-37.0' "$LIST"; then
+            PLATFORM="platforms;android-37.0"
+          elif grep -q 'platforms;android-37 ' "$LIST"; then
+            PLATFORM="platforms;android-37"
+          elif grep -q 'platforms;android-CinnamonBun' "$LIST"; then
+            PLATFORM="platforms;android-CinnamonBun"
+          else
+            echo "ERROR: Android 17 / API 37 platform package not found."
+            echo "Available Android platforms:"
+            grep 'platforms;android-' "$LIST" | tail -40 || true
+            exit 1
+          fi
+
+          BUILD_TOOLS="$(
+            grep -oE 'build-tools;37\.[0-9]+\.[0-9]+' "$LIST" \
+            | sort -V \
+            | tail -1
+          )"
+
+          if [[ -z "$BUILD_TOOLS" ]]; then
+            echo "No Build-Tools 37.x found; falling back to build-tools;36.0.0"
+            BUILD_TOOLS="build-tools;36.0.0"
+          fi
+
+          echo "Selected platform: $PLATFORM"
+          echo "Selected build tools: $BUILD_TOOLS"
+
+          "$sdkmanager_bin" --channel=3 \
+            "platform-tools" \
+            "$PLATFORM" \
+            "$BUILD_TOOLS"
+
+          echo "ANDROID_BUILD_TOOLS=${BUILD_TOOLS#build-tools;}" >> "$GITHUB_ENV"
+
+          echo "===== Installed SDK packages ====="
+          "$sdkmanager_bin" --list_installed
 
       - name: Locate or extract v15.0.5 source checkpoint
         id: source
